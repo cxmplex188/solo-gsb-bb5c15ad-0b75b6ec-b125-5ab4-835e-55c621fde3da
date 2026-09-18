@@ -116,6 +116,35 @@ function IssueRow({ issue }: { issue: Issue }) {
       </button>
       <div className="issue-message">{issue.message}</div>
 
+      {(issue.resolvedTargetIds?.length || issue.missingTargets?.length) && (
+        <div className="combined-targets">
+          {issue.resolvedTargetIds && issue.resolvedTargetIds.length > 0 && (
+            <div className="combined-line">
+              <span className="combined-tag">已解析：</span>
+              {issue.resolvedTargetIds.map((id) => (
+                <button
+                  key={id}
+                  className="link-btn"
+                  onClick={() => highlighter.jumpTo(id)}
+                >
+                  {labelOfNode(analysis, id)}
+                </button>
+              ))}
+            </div>
+          )}
+          {issue.missingTargets && issue.missingTargets.length > 0 && (
+            <div className="combined-line">
+              <span className="combined-tag">缺失：</span>
+              {issue.missingTargets.map((m, i) => (
+                <span key={`${m.raw}-${i}`} className="missing-target" title={m.reason}>
+                  {m.raw}（{m.reason}）
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {issue.type === 'ambiguous' && refOcc && (
         <CandidatePicker occurrence={refOcc} />
       )}

@@ -103,7 +103,7 @@ export function RelationView() {
                   className={`graph-edge ${cls} ${isHot ? 'hot' : ''}`}
                   d={`M ${p1.x} ${p1.y - 16} c -34 -8 -34 -44 0 -52`}
                   markerEnd="url(#arrow)"
-                  onMouseEnter={() => highlighter.hoverRef(g.keys[0], g.from)}
+                  onMouseEnter={() => highlighter.hoverRef(g.keys[0], [g.from])}
                   onMouseLeave={() => highlighter.hoverRef(null, null)}
                   onClick={() =>
                     highlighter.jumpTo(
@@ -131,7 +131,7 @@ export function RelationView() {
                 className={`graph-edge ${cls} ${isHot ? 'hot' : ''}`}
                 d={`M ${sx} ${sy} Q ${mx} ${my} ${ex} ${ey}`}
                 markerEnd={isHot ? 'url(#arrow-hot)' : 'url(#arrow)'}
-                onMouseEnter={() => highlighter.hoverRef(g.keys[0], g.to)}
+                onMouseEnter={() => highlighter.hoverRef(g.keys[0], [g.to])}
                 onMouseLeave={() => highlighter.hoverRef(null, null)}
                 onClick={() =>
                   highlighter.jumpTo(

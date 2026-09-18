@@ -1,4 +1,4 @@
-import type { RefSpan, NumStyle } from '../../shared/model';
+import type { RefSpan, NumStyle, ArticleRefMember } from '../../shared/model';
 import { parseOrdinal } from './numeral';
 
 const NUM = '0-9０-９零一二三四五六七八九十百千万两〇'; // 〇(U+3007) 放在末尾，避免被当作字符范围端点
@@ -13,11 +13,27 @@ function itemAbs(p: string): string {
   );
 }
 
+/** 组合/区间末尾不得紧跟款、项编号（如“第三条、第五条第二款”不成组合，各自回退为绝对引用） */
+const NOT_PAR_ITEM = `(?!${G}第${N}+${G}款)(?!${G}第${N}+${G}项)(?!${G}（${N}+）)`;
+
 /**
  * 总正则按优先级排列：
- * 绝对引用 → 本条链 → 前/后条链 → 前款 → 前项/本项/本款 → 裸（X）
+ * 条级组合 → 条级闭区间 → 绝对引用 → 本条链 → 前/后条链 → 前款 → 前项/本项/本款 → 裸（X）
  */
 const REF_SOURCE =
+  // 0a) 条级组合：第X条[之Y]（、/及/和/与 第X条[之Y]）一次以上；暂不解析组合中的款、项
+  `(?<alist>第${N}+${G}条(?:${G}之${G}${N}+)?` +
+  `(?:${G}[、及和与]${G}第${N}+${G}条(?:${G}之${G}${N}+)?)+)` +
+  NOT_PAR_ITEM +
+  `(?!${G}至${G}第)` + // “第三条、第五条至第七条”保持区间完整，不成组合
+  `|` +
+  // 0b) 条级闭区间：第X条[之Y]至第Y条[之Z]
+  `第(?<rStart>${N}+)${G}条` +
+  `(?:${G}之${G}(?<rStartSuf>${N}+))?` +
+  `${G}至${G}第(?<rEnd>${N}+)${G}条` +
+  `(?:${G}之${G}(?<rEndSuf>${N}+))?` +
+  NOT_PAR_ITEM +
+  `|` +
   // 1) 第X条[之Y][【条名】][第N款][第M项/（M）]
   `第(?<aNum>${N}+)${G}条` +
   `(?:${G}之${G}(?<aSuf>${N}+))?` +
@@ -68,6 +84,26 @@ function suffixWord(value: number): string {
   return SUFFIX_WORDS[value - 1] ?? String(value);
 }
 
+/** 从组合引用原文中逐个提取条级成员（书写顺序；命名组无法重复捕获，故二次解析） */
+const LIST_MEMBER_RE = new RegExp(`第(${N}+)${G}条(?:${G}之${G}(${N}+))?`, 'gu');
+
+function parseListMembers(raw: string): ArticleRefMember[] {
+  const members: ArticleRefMember[] = [];
+  LIST_MEMBER_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = LIST_MEMBER_RE.exec(raw)) !== null) {
+    const num = parseOrdinal(m[1]);
+    if (!num) continue;
+    const suf = m[2] !== undefined ? parseOrdinal(m[2]) : null;
+    members.push({
+      num: num.value,
+      style: num.style,
+      ...(suf ? { suffix: suffixWord(suf.value) } : {}),
+    });
+  }
+  return members;
+}
+
 /** 扫描一段正文中的全部交叉引用 span（按起始位置升序、互不嵌套） */
 export function scanReferences(text: string): RefSpan[] {
   const re = new RegExp(REF_SOURCE, 'gu');
@@ -79,7 +115,39 @@ export function scanReferences(text: string): RefSpan[] {
     const head = m[0];
     let span: RefSpan | null = null;
 
-    if (g['aNum'] !== undefined) {
+    if (g['alist'] !== undefined) {
+      const members = parseListMembers(g['alist']!);
+      if (members.length < 2) continue;
+      span = {
+        start: m.index,
+        end: m.index + head.length,
+        raw: head,
+        kind: 'articleList',
+        members,
+        // 兼容字段：首成员的条号与风格
+        articleNum: members[0].num,
+        articleStyle: members[0].style,
+        ...(members[0].suffix ? { articleSuffix: members[0].suffix } : {}),
+      };
+    } else if (g['rStart'] !== undefined) {
+      const s = parseOrdinal(g['rStart']!);
+      const e = parseOrdinal(g['rEnd']!);
+      if (!s || !e) continue;
+      const sSuf = g['rStartSuf'] !== undefined ? parseOrdinal(g['rStartSuf']!) : null;
+      const eSuf = g['rEndSuf'] !== undefined ? parseOrdinal(g['rEndSuf']!) : null;
+      span = {
+        start: m.index,
+        end: m.index + head.length,
+        raw: head,
+        kind: 'articleRange',
+        articleNum: s.value,
+        articleStyle: s.style,
+        ...(sSuf ? { articleSuffix: suffixWord(sSuf.value) } : {}),
+        rangeEndNum: e.value,
+        rangeEndStyle: e.style,
+        ...(eSuf ? { rangeEndSuffix: suffixWord(eSuf.value) } : {}),
+      };
+    } else if (g['aNum'] !== undefined) {
       const a = parseOrdinal(g['aNum']!);
       if (!a) continue;
       const suf = g['aSuf'] !== undefined ? parseOrdinal(g['aSuf']!) : null;

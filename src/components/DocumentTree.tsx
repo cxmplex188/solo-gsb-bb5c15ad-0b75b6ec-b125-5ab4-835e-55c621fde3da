@@ -99,7 +99,7 @@ function ArticleView({
   const issues = store.getSnapshot().analysis.issues.filter(
     (i) => i.sourceNodeId === article.id || i.cycleNodeIds?.includes(article.id),
   );
-  const glows = hl.hoverTargetNodeId === article.id;
+  const glows = hl.hoverTargetNodeIds.includes(article.id);
 
   // 问题跳转 / 关系图定位到“条”本身时滚动到该卡片
   useEffect(() => {
@@ -216,13 +216,13 @@ function ParagraphList({ article }: { article: ClauseNode }) {
   const { store, highlighter } = useApp();
   const analysis = store.getSnapshot().analysis;
   const hl = useHighlighter(highlighter);
-  const glowFor = hl.hoverTargetNodeId;
+  const glowFor = hl.hoverTargetNodeIds;
 
   return (
     <div className="paragraph-list">
       {article.children.map((paragraph, pi) => (
         <div
-          className={`node-card paragraph-card ${glowFor === paragraph.id ? 'target-glow' : ''}`}
+          className={`node-card paragraph-card ${glowFor.includes(paragraph.id) ? 'target-glow' : ''}`}
           key={paragraph.id}
           data-node-id={paragraph.id}
         >
@@ -249,7 +249,7 @@ function ParagraphList({ article }: { article: ClauseNode }) {
             <div className="item-list">
               {paragraph.children.map((item, ii) => (
                 <div
-                  className={`node-card item-card ${glowFor === item.id ? 'target-glow' : ''}`}
+                  className={`node-card item-card ${glowFor.includes(item.id) ? 'target-glow' : ''}`}
                   key={item.id}
                   data-node-id={item.id}
                 >

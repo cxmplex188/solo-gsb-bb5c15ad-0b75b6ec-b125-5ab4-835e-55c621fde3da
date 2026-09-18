@@ -106,7 +106,23 @@ function targetLabel(analysis: Analysis, occ: RefOccurrence): string | undefined
     return occ.resolution.canonical || labelAt(analysis, occ.resolution.targetId);
   }
   if (occ.resolution.status === 'ambiguous') return '歧义（未确认）';
+  // 组合引用部分缺失：列出已解析目标与缺失原因
+  if (occ.resolution.targetIds?.length) {
+    const resolved = occ.resolution.targetIds
+      .map((id) => labelAt(analysis, id))
+      .filter(Boolean)
+      .join('、');
+    return `部分缺失（已解析：${resolved}）：${occ.resolution.reason ?? ''}`;
+  }
   return `断链：${occ.resolution.reason ?? '目标不存在'}`;
+}
+
+/** 引用的目标集合签名：单目标退化为单元素，组合引用比较整个稳定 ID 集合 */
+function targetSetKey(occ: RefOccurrence): string {
+  const ids =
+    occ.resolution.targetIds ??
+    (occ.resolution.targetId ? [occ.resolution.targetId] : []);
+  return ids.join('');
 }
 
 /**
@@ -229,7 +245,7 @@ export function diffDocuments(
     }
     const sameTarget =
       occ.resolution.status === next.resolution.status &&
-      (occ.resolution.targetId ?? null) === (next.resolution.targetId ?? null);
+      targetSetKey(occ) === targetSetKey(next);
     if (!sameTarget) {
       refRetargeted.push({
         key: `mov:${sig}`,

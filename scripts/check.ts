@@ -698,5 +698,271 @@ check('同序号歧义', ambA.issues.some((i) => i.type === 'ambiguous'), JSON.s
   check('旧数据缺 termRules 按空规则加载（0 命中）', store2.getSnapshot().termHits.length === 0 && store2.getSnapshot().termRules.length === 0);
 }
 
+// ---- 组合引用 / 闭区间：扫描 ----
+{
+  const comb = scanReferences('应当符合第三条、第五条及第七条与第三条至第五条的规定。');
+  check('组合引用扫描为单个 span', comb.length === 2 && comb[0].kind === 'articleList', JSON.stringify(comb.map(s=>[s.kind,s.raw])));
+  check('组合成员 3/5/7', comb[0].members?.map((m) => m.num).join(',') === '3,5,7', JSON.stringify(comb[0].members));
+  check('闭区间扫描为单个 span', comb[1].kind === 'articleRange' && comb[1].raw === '第三条至第五条');
+  check('闭区间端点 3..5', comb[1].articleNum === 3 && comb[1].rangeEndNum === 5);
+  check('“和”可作组合分隔符', scanReferences('依第三条和第五条办理').some((s) => s.kind === 'articleList'));
+  // 组合内暂不解析款、项：回退为独立绝对引用
+  const parA = scanReferences('见第三条第二款、第五条。');
+  check('组合不解析款（前成员带款）', parA.length === 2 && parA.every((s) => s.kind === 'absolute'), JSON.stringify(parA.map(s=>s.raw)));
+  const parB = scanReferences('见第三条、第五条第二款。');
+  check('组合不解析款（末成员带款）', parB.length === 2 && parB.every((s) => s.kind === 'absolute'), JSON.stringify(parB.map(s=>s.raw)));
+  // 区间后紧跟款号也不成区间
+  const parC = scanReferences('见第三条至第五条第二款。');
+  check('区间末成员带款不成区间', parC.every((s) => s.kind === 'absolute'), JSON.stringify(parC.map(s=>[s.kind,s.raw])));
+}
+
+// ---- 组合引用 / 闭区间：解析为按文档顺序排列的稳定条 ID 集合 ----
+const combText = `组合法
+
+第一条
+参见第三条、第五条及第七条。
+
+第二条
+适用第三条至第五条的规定。
+
+第三条
+内容三。
+
+第四条
+内容四。
+
+第五条
+内容五。
+
+第六条
+内容六。
+
+第七条
+内容七。`;
+const combDoc = parseDocument(combText).doc;
+renumberAll(combDoc.root);
+const combA = analyze(combDoc, { confirmed: {} });
+const listOcc = combA.occurrences.find((o) => o.span.kind === 'articleList')!;
+const rangeOcc = combA.occurrences.find((o) => o.span.kind === 'articleRange')!;
+check('组合引用解析成功', listOcc?.resolution.status === 'ok', JSON.stringify(listOcc?.resolution));
+check('组合目标为稳定条 ID 集合', listOcc?.resolution.targetIds?.length === 3);
+check(
+  '组合目标按文档顺序排列',
+  listOcc?.resolution.targetIds?.join(',') ===
+    [combDoc.root[2].id, combDoc.root[4].id, combDoc.root[6].id].join(','),
+);
+check('闭区间展开为 3 个目标', rangeOcc?.resolution.targetIds?.length === 3, JSON.stringify(rangeOcc?.resolution.targetIds));
+check(
+  '闭区间目标按文档顺序',
+  rangeOcc?.resolution.targetIds?.join(',') ===
+    [combDoc.root[2].id, combDoc.root[3].id, combDoc.root[4].id].join(','),
+);
+check('组合规范形式展开为顿号列表', listOcc?.resolution.canonical === '第三条、第五条、第七条', listOcc?.resolution.canonical ?? '');
+check('区间规范形式保持区间', rangeOcc?.resolution.canonical === '第三条至第五条', rangeOcc?.resolution.canonical ?? '');
+check('组合引用为每个目标建边', combA.edges.filter((e) => e.refKey === listOcc.key).length === 3);
+check('闭区间为每个目标建边', combA.edges.filter((e) => e.refKey === rangeOcc.key).length === 3);
+
+// ---- 组合引用：结构改写（连续→区间，不连续→顿号列表） ----
+{
+  // 把第二条移到末尾：区间目标 {三,四,五}→{2,3,4} 仍连续；组合 {三,五,七}→{2,4,6} 不连续
+  const r = applyStructuralChange(combDoc, combA, (root) => {
+    const second = root.splice(1, 1)[0];
+    root.push(second);
+  });
+  const art1 = r.doc.root[0].children[0].text;
+  const movedArt = r.doc.root.find((a) => a.id === combDoc.root[1].id)!;
+  const art2 = movedArt.children[0].text;
+  check('组合不连续 → 展开为顿号列表', art1 === '参见第二条、第四条、第六条。', art1);
+  check('区间目标仍连续 → 输出区间', art2 === '适用第二条至第四条的规定。', art2);
+  check('组合改写计入 rewritten', r.rewritten === 2, String(r.rewritten));
+}
+
+// ---- 组合引用：改写形式随目标集合连续性互换（列表↔区间） ----
+{
+  // 列表目标连续 → 折叠为区间
+  const listDoc = parseDocument(`折叠法
+
+第一条
+参见第三条、第四条及第五条。
+
+第二条
+内容二。
+
+第三条
+内容三。
+
+第四条
+内容四。
+
+第五条
+内容五。`).doc;
+  renumberAll(listDoc.root);
+  const listA = analyze(listDoc, { confirmed: {} });
+  const r1 = applyStructuralChange(listDoc, listA, (root) => {
+    const first = root.shift()!; // 第一条移到末尾：{三,四,五}→{1,2,3} 仍连续
+    root.push(first);
+  });
+  const collapsed = r1.doc.root.find((a) => a.id === listDoc.root[0].id)!.children[0].text;
+  check('列表目标连续 → 折叠为区间', collapsed === '参见第二条至第四条。', collapsed);
+
+  // 区间目标被拆散 → 展开为顿号列表
+  const rangeDoc = parseDocument(`展开法
+
+第一条
+适用第三条至第五条。
+
+第二条
+内容二。
+
+第三条
+内容三。
+
+第四条
+内容四。
+
+第五条
+内容五。`).doc;
+  renumberAll(rangeDoc.root);
+  const rangeA = analyze(rangeDoc, { confirmed: {} });
+  const r2 = applyStructuralChange(rangeDoc, rangeA, (root) => {
+    const fourth = root.splice(3, 1)[0]; // 第四条移到最前：{三,四,五}→{4,1,5} 不连续
+    root.unshift(fourth);
+  });
+  const expanded = r2.doc.root.find((a) => a.id === rangeDoc.root[0].id)!.children[0].text;
+  check('区间目标不连续 → 展开为顿号列表', expanded === '适用第一条、第四条、第五条。', expanded);
+}
+
+// ---- 组合引用：沿用原数字风格（阿拉伯数字） ----
+{
+  const arabDoc = parseDocument(`风格法
+
+第1条
+参见第3条至第5条与第2条、第4条。
+
+第2条
+内容。
+
+第3条
+内容。
+
+第4条
+内容。
+
+第5条
+内容。`).doc;
+  renumberAll(arabDoc.root);
+  const arabA = analyze(arabDoc, { confirmed: {} });
+  const r = applyStructuralChange(arabDoc, arabA, (root) => {
+    const second = root.splice(1, 1)[0];
+    root.push(second);
+  });
+  const art1 = r.doc.root[0].children[0].text;
+  check('区间改写沿用阿拉伯风格', art1.includes('第2条至第4条'), art1);
+  check('组合展开沿用阿拉伯风格', art1.includes('第3条、第5条'), art1);
+}
+
+// ---- 组合引用：任一目标被删除 → 整段不改写 ----
+{
+  const r = applyStructuralChange(combDoc, combA, (root) => {
+    root.splice(4, 1); // 删除第五条
+  });
+  const texts = JSON.stringify(r.doc);
+  check('组合目标被删除 → 组合整段不改写', texts.includes('参见第三条、第五条及第七条。'));
+  check('区间目标被删除 → 区间整段不改写', texts.includes('适用第三条至第五条的规定。'));
+  check(
+    '删除目标计入 skipped（targetMissing）',
+    r.skipped.filter((s) => s.targetMissing).length === 2,
+    JSON.stringify(r.skipped),
+  );
+}
+
+// ---- 组合引用：部分目标缺失 → 问题面板列出已解析与缺失目标 ----
+{
+  const partDoc = parseDocument(`部分缺失法
+
+第一条
+参见第三条、第九条。
+
+第二条
+内容二。
+
+第三条
+内容三。`).doc;
+  renumberAll(partDoc.root);
+  const partA = analyze(partDoc, { confirmed: {} });
+  const occ = partA.occurrences.find((o) => o.span.kind === 'articleList')!;
+  check('部分缺失：整体标记 broken', occ?.resolution.status === 'broken');
+  check('部分缺失：保留已解析目标', occ?.resolution.targetIds?.join() === partDoc.root[2].id);
+  check('部分缺失：记录缺失成员', occ?.resolution.missingTargets?.[0]?.raw === '第九条');
+  const issue = partA.issues.find((i) => i.type === 'broken' && i.refKey === occ.key)!;
+  check('问题项列出已解析目标', issue?.resolvedTargetIds?.length === 1);
+  check('问题项列出缺失目标', issue?.missingTargets?.length === 1);
+  check('部分缺失仍为已解析目标建边', partA.edges.some((e) => e.refKey === occ.key && e.targetArticleId === partDoc.root[2].id));
+}
+
+// ---- 闭区间：端点有歧义 → 整段不改写并列出缺失 ----
+{
+  const ambDoc = parseDocument(`歧义区间法
+
+第一条
+适用第二条至第三条。
+
+第二条
+内容二。
+
+第三条
+内容三。
+
+第三条之一
+内容三之一。`).doc;
+  // 不 renumber：保留“第三条之一”与“第三条”同序号
+  const ambA = analyze(ambDoc, { confirmed: {} });
+  const occ = ambA.occurrences.find((o) => o.span.kind === 'articleRange')!;
+  check('端点歧义：整体 broken', occ?.resolution.status === 'broken', JSON.stringify(occ?.resolution));
+  check('端点歧义：缺失目标记录端点', occ?.resolution.missingTargets?.some((m) => m.raw === '第三条'));
+  check('端点歧义：已解析端点保留', occ?.resolution.targetIds?.join() === ambDoc.root[1].id);
+  const r = applyStructuralChange(ambDoc, ambA, (root) => {
+    const first = root.shift()!;
+    root.push(first);
+  });
+  check('端点歧义 → 结构操作后区间原文不变', JSON.stringify(r.doc).includes('适用第二条至第三条。'));
+  check('端点歧义计入 skipped', r.skipped.some((s) => s.raw === '第二条至第三条'), JSON.stringify(r.skipped));
+}
+
+// ---- 组合引用：目标集合包含本条 → 自引用 ----
+{
+  const selfDoc = parseDocument(`自指组合法
+
+第一条
+内容一。
+
+第二条
+适用第一条至第三条。
+
+第三条
+内容三。`).doc;
+  renumberAll(selfDoc.root);
+  const selfA = analyze(selfDoc, { confirmed: {} });
+  check(
+    '组合目标包含本条 → 自引用',
+    selfA.issues.some((i) => i.type === 'self' && i.message.includes('目标集合包含本条')),
+    JSON.stringify(selfA.issues.map((i) => i.message)),
+  );
+}
+
+// ---- 组合引用：结构操作 + 组合改写 = 一次撤销步骤 ----
+{
+  const storeDoc = parseDocument(combText).doc;
+  renumberAll(storeDoc.root);
+  const store = new AppStore({ doc: storeDoc, confirmed: {}, annotations: [] });
+  const before = store.getSnapshot().doc.root[0].children[0].text;
+  store.reorderSibling(storeDoc.root[1].id, 99); // 第二条移到末尾
+  const after = store.getSnapshot().doc.root[0].children[0].text;
+  check('结构操作后组合引用已改写', after === '参见第二条、第四条、第六条。', after);
+  check('组合改写与结构操作为一次撤销', (store.undo(), store.getSnapshot().doc.root[0].children[0].text === before));
+  check('撤销后结构一并恢复', store.getSnapshot().doc.root[1].id === storeDoc.root[1].id);
+  check('重做再次应用组合改写', (store.redo(), store.getSnapshot().doc.root[0].children[0].text === after));
+}
+
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项`);
 process.exit(fail ? 1 : 0);

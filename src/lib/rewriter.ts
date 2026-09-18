@@ -2,14 +2,18 @@ import type {
   Analysis,
   ClauseDocument,
   ClauseNode,
+  NumStyle,
   RefOccurrence,
 } from '../../shared/model';
 import { cloneTree, findNode, renumberAll, touch } from './tree';
 import { formatOrdinal } from './numeral';
+import { renderArticleSet } from './articleset';
 
 /** 节点在树中的绝对结构坐标（id → 坐标） */
 export interface Locator {
   nodeId: string;
+  /** 所属条在 root 中的下标（文档顺序） */
+  articleIndex: number;
   articleOrdinal: number;
   suffix: string;
   paragraphIndex: number; // 0 表示条头
@@ -18,9 +22,10 @@ export interface Locator {
 
 export function buildLocators(root: ClauseNode[]): Map<string, Locator> {
   const map = new Map<string, Locator>();
-  for (const article of root) {
+  root.forEach((article, ai) => {
     const base: Locator = {
       nodeId: article.id,
+      articleIndex: ai,
       articleOrdinal: article.ordinal,
       suffix: article.suffix ?? '',
       paragraphIndex: 0,
@@ -38,7 +43,7 @@ export function buildLocators(root: ClauseNode[]): Map<string, Locator> {
         });
       });
     });
-  }
+  });
   return map;
 }
 
@@ -74,6 +79,58 @@ function locatorKey(loc: Locator): string {
   return `${loc.articleOrdinal}/${loc.suffix}/${loc.paragraphIndex}/${loc.itemIndex}`;
 }
 
+/** 组合引用各目标沿用的数字风格：列表按成员原风格，区间统一用起点风格 */
+function combinedMemberStyles(
+  occ: RefOccurrence,
+  targetIds: string[],
+  oldLoc: Map<string, Locator>,
+): Map<string, NumStyle> {
+  const map = new Map<string, NumStyle>();
+  const span = occ.span;
+  if (span.kind === 'articleList') {
+    for (const m of span.members ?? []) {
+      const tid = targetIds.find((id) => {
+        const l = oldLoc.get(id);
+        return l && l.articleOrdinal === m.num && l.suffix === (m.suffix ?? '');
+      });
+      if (tid && !map.has(tid)) map.set(tid, m.style);
+    }
+    const fallback = span.members?.[0]?.style ?? 'chinese';
+    for (const id of targetIds) if (!map.has(id)) map.set(id, fallback);
+  } else {
+    const s = span.articleStyle ?? 'chinese';
+    for (const id of targetIds) map.set(id, s);
+  }
+  return map;
+}
+
+/** 按指定坐标集渲染组合引用的目标集合（按文档顺序排列后交由 renderArticleSet） */
+function renderCombinedTargets(
+  targetIds: string[],
+  loc: Map<string, Locator>,
+  articles: ClauseNode[],
+  styles: Map<string, NumStyle>,
+  rangeEndStyle: NumStyle | undefined,
+): string {
+  const members = targetIds
+    .map((id) => {
+      const l = loc.get(id)!;
+      return {
+        id,
+        ordinal: l.articleOrdinal,
+        suffix: l.suffix,
+        style: styles.get(id) ?? ('chinese' as NumStyle),
+        order: l.articleIndex,
+      };
+    })
+    .sort((a, b) => a.order - b.order);
+  return renderArticleSet(
+    members,
+    articles.map((a) => ({ id: a.id, ordinal: a.ordinal })),
+    rangeEndStyle,
+  );
+}
+
 export interface RewriteResult {
   doc: ClauseDocument;
   rewritten: number;
@@ -105,6 +162,53 @@ export function applyStructuralChange(
   let rewritten = 0;
 
   for (const occ of prevAnalysis.occurrences) {
+    // 条级组合 / 闭区间引用：保持原目标集合，整体重渲染
+    if (occ.span.kind === 'articleList' || occ.span.kind === 'articleRange') {
+      const targetIds = occ.resolution.targetIds ?? [];
+      if (occ.resolution.status !== 'ok' || targetIds.length === 0) {
+        // 端点歧义 / 部分目标缺失：整段不改写
+        skipped.push({
+          nodeId: occ.nodeId,
+          raw: occ.span.raw,
+          reason: occ.resolution.reason ?? '组合引用目标无法唯一定位，整段未改写',
+          targetMissing: false,
+        });
+        continue;
+      }
+      const deleted = targetIds.filter((id) => !newLoc.has(id));
+      if (deleted.length > 0) {
+        // 任一目标被删除：整段不改写
+        const labels = deleted.map((id) => {
+          const l = oldLoc.get(id);
+          return l
+            ? `第${formatOrdinal(l.articleOrdinal)}条${l.suffix ? `之${l.suffix}` : ''}`
+            : id;
+        });
+        skipped.push({
+          nodeId: occ.nodeId,
+          raw: occ.span.raw,
+          reason: `组合引用目标 ${labels.join('、')} 在本次调整中被删除，整段未改写`,
+          targetMissing: true,
+        });
+        continue;
+      }
+      // 源节点本身被删除则其文本随之消失
+      if (!findNode(root, occ.nodeId)) continue;
+
+      const styles = combinedMemberStyles(occ, targetIds, oldLoc);
+      const rangeEndStyle =
+        occ.span.kind === 'articleRange' ? occ.span.rangeEndStyle : undefined;
+      const oldText = renderCombinedTargets(targetIds, oldLoc, prevDoc.root, styles, rangeEndStyle);
+      const newText = renderCombinedTargets(targetIds, newLoc, root, styles, rangeEndStyle);
+      if (oldText === newText) continue; // 目标集合的可见形式未变化
+
+      const list = replsByNode.get(occ.nodeId) ?? [];
+      list.push({ start: occ.span.start, end: occ.span.end, text: newText });
+      replsByNode.set(occ.nodeId, list);
+      rewritten += 1;
+      continue;
+    }
+
     if (occ.span.kind !== 'absolute') continue; // 相对引用位置跟随，不改写
 
     const targetId = occ.resolution.targetId;

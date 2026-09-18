@@ -24,15 +24,20 @@ export function RefInline({
   const { resolution, span } = occurrence;
   const { analysis } = store.getSnapshot();
 
-  const targetId = resolution.targetId ?? null;
+  const isCombined = span.kind === 'articleList' || span.kind === 'articleRange';
+  const targetIds =
+    resolution.targetIds ?? (resolution.targetId ? [resolution.targetId] : []);
+  const targetId = resolution.targetId ?? targetIds[0] ?? null;
   const targetArticle = targetId ? analysis.placement[targetId]?.article.id : null;
   const sourceArticle = analysis.placement[occurrence.nodeId]?.article.id;
-  const nodeSelf = resolution.status === 'ok' && targetId === occurrence.nodeId;
+  const nodeSelf = !isCombined && resolution.status === 'ok' && targetId === occurrence.nodeId;
   const articleSelf =
     resolution.status === 'ok' &&
-    span.kind === 'absolute' &&
-    targetArticle !== undefined &&
-    targetArticle === sourceArticle;
+    ((span.kind === 'absolute' &&
+      targetArticle !== undefined &&
+      targetArticle === sourceArticle) ||
+      (isCombined &&
+        targetIds.some((id) => analysis.placement[id]?.article.id === sourceArticle)));
   const selfRef = nodeSelf || articleSelf;
 
   const statusClass =
@@ -50,23 +55,27 @@ export function RefInline({
 
   const title =
     resolution.status === 'broken'
-      ? `断链：${resolution.reason ?? '目标不存在'}`
+      ? isCombined
+        ? `组合引用部分缺失：${resolution.reason ?? '部分目标不存在'}（整段不会自动改写）`
+        : `断链：${resolution.reason ?? '目标不存在'}`
       : resolution.status === 'ambiguous'
         ? `歧义：${resolution.reason ?? '存在多个候选，需在右侧确认'}`
         : selfRef
           ? '自引用'
           : resolution.ambiguity
             ? `已确认的歧义引用 → ${resolution.canonical ?? ''}`
-            : STATUS_TITLE.ok;
+            : isCombined
+              ? `组合引用 → ${resolution.canonical ?? ''}（点击定位第一个目标）`
+              : STATUS_TITLE.ok;
 
   return (
     <button
       type="button"
       className={`ref-chip ${statusClass} ${active ? 'ref-active' : ''} ${highlight ? 'ref-in-sentence' : ''} ${annotationCovered ? 'ref-has-ann' : ''} ${annotationActive ? 'ref-ann-active' : ''}`}
       title={title}
-      onMouseEnter={() => highlighter.hoverRef(occurrence.key, targetId)}
+      onMouseEnter={() => highlighter.hoverRef(occurrence.key, targetIds)}
       onMouseLeave={() => highlighter.hoverRef(null, null)}
-      onFocus={() => highlighter.hoverRef(occurrence.key, targetId)}
+      onFocus={() => highlighter.hoverRef(occurrence.key, targetIds)}
       onBlur={() => highlighter.hoverRef(null, null)}
       onClick={(e) => {
         e.stopPropagation();

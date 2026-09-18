@@ -5,12 +5,14 @@ import type {
   ClauseNode,
   Issue,
   NodePlacement,
+  NumStyle,
   RefOccurrence,
   RefResolution,
   RefSpan,
 } from '../../shared/model';
 import { scanReferences } from './scanner';
 import { formatOrdinal } from './numeral';
+import { renderArticleSet } from './articleset';
 
 interface FlatNode {
   node: ClauseNode;
@@ -95,6 +97,11 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
     const here = byId.get(nodeId);
     if (!here) return { resolution: { status: 'broken', reason: '源节点不存在' } };
     const { placement: hp } = here;
+
+    // 条级组合 / 闭区间：解析为按文档顺序排列的稳定条 ID 集合
+    if (span.kind === 'articleList' || span.kind === 'articleRange') {
+      return { resolution: resolveCombined(span, articles) };
+    }
 
     let article: ClauseNode | undefined;
     let paragraphNum: number | undefined;
@@ -309,22 +316,29 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
     (byNode[occ.nodeId] ??= []).push(occ);
   }
 
-  // 边（条级）
+  // 边（条级）：组合引用为每个已解析目标各建一条边（部分缺失时仍关联全部已解析目标）
   const edges: ArticleEdge[] = [];
   for (const occ of occurrences) {
-    if (occ.resolution.status !== 'ok' || !occ.resolution.targetId) continue;
+    const targetIds =
+      occ.resolution.targetIds ??
+      (occ.resolution.status === 'ok' && occ.resolution.targetId
+        ? [occ.resolution.targetId]
+        : []);
     const src = placement[occ.nodeId];
-    const dst = placement[occ.resolution.targetId];
-    if (!src || !dst) continue;
-    edges.push({
-      sourceArticleId: src.article.id,
-      targetArticleId: dst.article.id,
-      sourceNodeId: occ.nodeId,
-      targetNodeId: occ.resolution.targetId,
-      kind: occ.span.kind,
-      status: occ.resolution.status,
-      refKey: occ.key,
-    });
+    if (!src) continue;
+    for (const tid of targetIds) {
+      const dst = placement[tid];
+      if (!dst) continue;
+      edges.push({
+        sourceArticleId: src.article.id,
+        targetArticleId: dst.article.id,
+        sourceNodeId: occ.nodeId,
+        targetNodeId: tid,
+        kind: occ.span.kind,
+        status: occ.resolution.status,
+        refKey: occ.key,
+      });
+    }
   }
 
   // 问题：断链 / 自引用 / 歧义
@@ -342,11 +356,21 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
       refKey: occ.key,
     };
     if (occ.resolution.status === 'broken') {
+      const combined = occ.span.kind === 'articleList' || occ.span.kind === 'articleRange';
       issues.push({
         ...base,
         type: 'broken',
         targetNodeId: undefined,
-        message: `断链：${occ.span.raw} —— ${occ.resolution.reason ?? '目标不存在'}`,
+        // 组合引用：问题面板列出已解析与缺失目标
+        ...(combined && occ.resolution.targetIds?.length
+          ? { resolvedTargetIds: occ.resolution.targetIds }
+          : {}),
+        ...(combined && occ.resolution.missingTargets?.length
+          ? { missingTargets: occ.resolution.missingTargets }
+          : {}),
+        message: combined
+          ? `组合引用：${occ.span.raw} —— ${occ.resolution.reason ?? '部分目标不存在'}`
+          : `断链：${occ.span.raw} —— ${occ.resolution.reason ?? '目标不存在'}`,
       });
     } else if (occ.resolution.status === 'ambiguous') {
       issues.push({
@@ -382,6 +406,22 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
         targetNodeId: occ.resolution.targetId,
         message: `自引用：${occ.span.raw} 以绝对形式指向本条，建议改为“本条”相对引用`,
       });
+    } else if (
+      // 组合引用的目标集合包含本条（如本条正文写“第一条至第三条”而本条在区间内）
+      (occ.span.kind === 'articleList' || occ.span.kind === 'articleRange') &&
+      occ.resolution.targetIds?.some(
+        (tid) => placement[tid]?.article.id === placement[occ.nodeId]?.article.id,
+      )
+    ) {
+      const selfTarget = occ.resolution.targetIds!.find(
+        (tid) => placement[tid]?.article.id === placement[occ.nodeId]?.article.id,
+      )!;
+      issues.push({
+        ...base,
+        type: 'self',
+        targetNodeId: selfTarget,
+        message: `自引用：${occ.span.raw} 的目标集合包含本条`,
+      });
     }
   }
 
@@ -415,6 +455,85 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
 
 function articleLabel(a: ClauseNode): string {
   return formatOrdinal(a.ordinal) + '条' + (a.suffix ? `之${a.suffix}` : '');
+}
+
+/**
+ * 解析条级组合 / 闭区间引用：
+ * 每个成员（或区间端点）按绝对引用同款规则定位（同序号后缀条视为歧义），
+ * 区间在两端点均唯一时按序号闭区间展开；结果按文档顺序排列。
+ * 任一成员缺失或有歧义时整体标记 broken，同时保留已解析与缺失目标。
+ */
+function resolveCombined(span: RefSpan, articles: ClauseNode[]): RefResolution {
+  const missing: { raw: string; reason: string }[] = [];
+  const found = new Map<string, ClauseNode>();
+
+  const locate = (num: number, suffix: string | undefined, style: NumStyle | undefined): void => {
+    const label = `第${formatOrdinal(num, style)}条${suffix ? `之${suffix}` : ''}`;
+    const exact = articles.find((a) => a.ordinal === num && (a.suffix ?? '') === (suffix ?? ''));
+    if (!exact) {
+      missing.push({ raw: label, reason: '目标条不存在' });
+      return;
+    }
+    if (!suffix) {
+      const sameOrdinal = articles.filter((a) => a.ordinal === num);
+      if (sameOrdinal.length > 1) {
+        missing.push({
+          raw: label,
+          reason: `存在 ${sameOrdinal.length} 个“${label}”（含“之一/之二”后缀条），无法唯一确定`,
+        });
+        return;
+      }
+    }
+    found.set(exact.id, exact);
+  };
+
+  if (span.kind === 'articleList') {
+    for (const m of span.members ?? []) locate(m.num, m.suffix, m.style);
+  } else {
+    const startNum = span.articleNum!;
+    const endNum = span.rangeEndNum!;
+    locate(startNum, span.articleSuffix, span.articleStyle);
+    locate(endNum, span.rangeEndSuffix, span.rangeEndStyle);
+    if (missing.length === 0) {
+      if (startNum > endNum) {
+        missing.push({ raw: span.raw, reason: '区间起点大于终点，无法确定区间' });
+      } else {
+        for (const a of articles) {
+          if (a.ordinal >= startNum && a.ordinal <= endNum) found.set(a.id, a);
+        }
+      }
+    }
+  }
+
+  const targets = articles.filter((a) => found.has(a.id));
+  const targetIds = targets.map((t) => t.id);
+  const ok = missing.length === 0 && targetIds.length > 0;
+  return {
+    status: ok ? 'ok' : 'broken',
+    ...(targetIds.length > 0 ? { targetId: targetIds[0], targetIds } : {}),
+    ...(missing.length > 0 ? { missingTargets: missing } : {}),
+    ...(ok
+      ? {
+          canonical: renderArticleSet(
+            targets.map((t) => ({
+              id: t.id,
+              ordinal: t.ordinal,
+              suffix: t.suffix ?? '',
+              style: 'chinese' as NumStyle,
+            })),
+            articles.map((a) => ({ id: a.id, ordinal: a.ordinal })),
+          ),
+        }
+      : {}),
+    ...(!ok
+      ? {
+          reason:
+            missing.length > 0
+              ? `部分目标无法定位：${missing.map((m) => m.raw).join('、')}`
+              : '没有可定位的目标',
+        }
+      : {}),
+  };
 }
 
 /** 生成规范引用文本：绝对形式、中文数字 */

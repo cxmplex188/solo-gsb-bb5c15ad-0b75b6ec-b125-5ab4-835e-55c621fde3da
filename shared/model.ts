@@ -26,6 +26,8 @@ export interface ClauseDocument {
 
 export type NumStyle = 'arabic' | 'chinese';
 export type RefKind =
+  | 'articleList' // 第X条、第Y条及第Z条（条级组合引用，暂不解析组合内的款、项）
+  | 'articleRange' // 第X条至第Y条（条级闭区间）
   | 'absolute' // 第X条[之Y][第N款][第M项 / （M）]
   | 'this' // 本条[第N款][第M项]
   | 'prevArticle' // 前条 / 上条[链]
@@ -35,6 +37,14 @@ export type RefKind =
   | 'thisParagraph' // 本款[第M项]
   | 'thisItem' // 本项
   | 'bareItem'; // （M）
+
+/** 组合引用中的单个条级成员（书写顺序） */
+export interface ArticleRefMember {
+  num: number;
+  /** 条序号后缀原文，如“一”（之一） */
+  suffix?: string;
+  style: NumStyle;
+}
 
 export interface RefSpan {
   start: number;
@@ -50,14 +60,24 @@ export interface RefSpan {
   articleStyle?: NumStyle;
   paragraphStyle?: NumStyle;
   itemStyle?: NumStyle;
+  /** 组合引用成员（articleList，按书写顺序） */
+  members?: ArticleRefMember[];
+  /** 闭区间终点（articleRange） */
+  rangeEndNum?: number;
+  rangeEndSuffix?: string;
+  rangeEndStyle?: NumStyle;
 }
 
 export type RefStatus = 'ok' | 'broken' | 'ambiguous';
 
 export interface RefResolution {
   status: RefStatus;
-  /** 唯一定位时的目标节点 id */
+  /** 唯一定位时的目标节点 id（组合引用为按文档顺序的第一个目标） */
   targetId?: string;
+  /** 组合引用：解析出的全部目标条 id（按文档顺序排列的稳定集合） */
+  targetIds?: string[];
+  /** 组合引用：无法定位的成员/端点（问题面板据此列出已解析与缺失目标） */
+  missingTargets?: { raw: string; reason: string }[];
   /** 歧义时的候选节点 id 列表 */
   candidates?: string[];
   /** 唯一定位时的规范引用文字 */
@@ -100,6 +120,10 @@ export interface Issue {
   message: string;
   /** 循环路径上的节点 id */
   cycleNodeIds?: string[];
+  /** 组合引用：已解析目标（可跳转定位） */
+  resolvedTargetIds?: string[];
+  /** 组合引用：缺失目标（原文与原因） */
+  missingTargets?: { raw: string; reason: string }[];
   /** 歧义已被用户确认时的目标 id（问题转为“已确认”状态，仍可撤销） */
   confirmedTargetId?: string;
 }
