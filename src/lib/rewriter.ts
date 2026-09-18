@@ -6,6 +6,7 @@ import type {
 } from '../../shared/model';
 import { cloneTree, findNode, renumberAll, touch } from './tree';
 import { formatOrdinal } from './numeral';
+import { renderArticleCombo } from './analyzer';
 
 /** 节点在树中的绝对结构坐标（id → 坐标） */
 export interface Locator {
@@ -74,6 +75,18 @@ function locatorKey(loc: Locator): string {
   return `${loc.articleOrdinal}/${loc.suffix}/${loc.paragraphIndex}/${loc.itemIndex}`;
 }
 
+/** 一组条（按文档顺序）是否在条号上连续且均无后缀 */
+function isContiguous(locs: Locator[]): boolean {
+  if (locs.length < 2) return false;
+  return locs.every(
+    (l, i) =>
+      i === 0 ||
+      (l.suffix === '' &&
+        locs[i - 1].suffix === '' &&
+        l.articleOrdinal === locs[i - 1].articleOrdinal + 1),
+  );
+}
+
 export interface RewriteResult {
   doc: ClauseDocument;
   rewritten: number;
@@ -105,6 +118,92 @@ export function applyStructuralChange(
   let rewritten = 0;
 
   for (const occ of prevAnalysis.occurrences) {
+    const isCombo = occ.span.kind === 'articleList' || occ.span.kind === 'articleRange';
+
+    if (isCombo) {
+      // 条级组合引用：整段改写或整段保留
+      const res = occ.resolution;
+      if (res.status !== 'ok' || !res.targetRefs || res.targetRefs.length < 2) {
+        skipped.push({
+          nodeId: occ.nodeId,
+          raw: occ.span.raw,
+          reason: res.reason ?? '组合引用含缺失或歧义目标',
+          targetMissing: false,
+        });
+        continue;
+      }
+
+      const targets = res.targetRefs;
+      const beforeLocs = targets.map((t) => oldLoc.get(t.nodeId));
+      const afterLocs = targets.map((t) => newLoc.get(t.nodeId));
+
+      if (beforeLocs.some((l) => !l)) continue; // 理论上不会发生
+      const deleted = targets.filter((_, i) => !afterLocs[i]);
+      if (deleted.length > 0) {
+        // 任一目标被删除：整段不改写
+        skipped.push({
+          nodeId: occ.nodeId,
+          raw: occ.span.raw,
+          reason: `组合引用的 ${deleted.length} 个目标在本次调整中被删除`,
+          targetMissing: true,
+        });
+        continue;
+      }
+
+      // 组合中包含“之一/之二”后缀条：闭区间无法表达后缀端点，列举形式在后缀条与同序号条
+      // 相邻重排时端点也可能产生歧义，按规格保守处理——整段不改写
+      if (afterLocs.some((l) => l!.suffix !== '')) {
+        skipped.push({
+          nodeId: occ.nodeId,
+          raw: occ.span.raw,
+          reason:
+            occ.span.kind === 'articleRange'
+              ? '闭区间包含“之一/之二”后缀条，端点重排后可能有歧义，未自动改写'
+              : '组合引用包含“之一/之二”后缀条，端点重排后可能有歧义，未自动改写',
+          targetMissing: false,
+        });
+        continue;
+      }
+
+      // 源节点本身被删除则其文本随之消失
+      if (!findNode(root, occ.nodeId)) continue;
+
+      const after = afterLocs as NonNullable<(typeof afterLocs)[number]>[];
+      const before = beforeLocs as NonNullable<(typeof beforeLocs)[number]>[];
+      const beforeContiguous = isContiguous(before);
+      const afterContiguous = isContiguous(after);
+
+      // 结构调整后目标一律按文档顺序排列；比较调整前后“文档顺序的身份序列”，
+      // 任一目标条号变化或排列被置换（如原 3,4,5 换位为 3,5,4）都需要改写
+      const orderOf = (locsRoot: ClauseNode[], id: string) =>
+        locsRoot.findIndex((x) => x.id === id);
+      const beforeByOrder = [...before].sort(
+        (a, b) => orderOf(prevDoc.root, a.nodeId) - orderOf(prevDoc.root, b.nodeId),
+      );
+      const afterByOrder = [...after].sort(
+        (a, b) => orderOf(root, a.nodeId) - orderOf(root, b.nodeId),
+      );
+      const sequenceChanged = beforeByOrder.some((l, i) => l.nodeId !== afterByOrder[i].nodeId);
+      const ordinalChanged = before.some((l, i) => l.articleOrdinal !== after[i].articleOrdinal);
+
+      // 仅当目标条号变化、排列置换，或目标集合的连续性变化（连续↔不连续）时改写
+      if (!ordinalChanged && !sequenceChanged && beforeContiguous === afterContiguous) continue;
+
+      // 目标按新文档顺序排列；保留区间表达偏好（原表达式为闭区间且仍连续时输出区间）
+      const sortedTargets = afterByOrder.map((l) => ({
+        nodeId: l.nodeId,
+        articleStyle: targets.find((t) => t.nodeId === l.nodeId)!.articleStyle,
+      }));
+
+      const preferRange = occ.span.kind === 'articleRange';
+      const text = renderArticleCombo(sortedTargets, root, preferRange);
+      const list = replsByNode.get(occ.nodeId) ?? [];
+      list.push({ start: occ.span.start, end: occ.span.end, text });
+      replsByNode.set(occ.nodeId, list);
+      rewritten += 1;
+      continue;
+    }
+
     if (occ.span.kind !== 'absolute') continue; // 相对引用位置跟随，不改写
 
     const targetId = occ.resolution.targetId;

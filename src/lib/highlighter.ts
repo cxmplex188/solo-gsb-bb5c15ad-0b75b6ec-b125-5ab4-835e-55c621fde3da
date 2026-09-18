@@ -3,8 +3,10 @@ import { useSyncExternalStore } from 'react';
 export interface HighlightState {
   /** 悬停中的引用 key（正文 <-> 关系图联动） */
   hoverRefKey: string | null;
-  /** 悬停引用对应的目标节点（目标卡片发光） */
+  /** 悬停引用对应的目标节点（单目标，或组合引用的第一个目标；目标卡片发光） */
   hoverTargetNodeId: string | null;
+  /** 组合引用悬停时的全部目标节点（正文与关系图同时关联全部目标） */
+  hoverTargetNodeIds: string[];
   /** 当前聚焦节点（问题跳转 / 点击引用目标） */
   activeNodeId: string | null;
   /** 点击边或问题时锁定的来源引用 key */
@@ -22,6 +24,7 @@ export interface HighlightState {
 const initial: HighlightState = {
   hoverRefKey: null,
   hoverTargetNodeId: null,
+  hoverTargetNodeIds: [],
   activeNodeId: null,
   activeRefKey: null,
   focusSentence: null,
@@ -51,9 +54,16 @@ export class Highlighter {
     this.set({ hoverRefKey: refKey });
   }
 
-  /** 悬停引用时：标记引用本身 + 目标节点发光（不影响跳转用的 activeNodeId） */
-  hoverRef(refKey: string | null, targetNodeId: string | null): void {
-    this.set({ hoverRefKey: refKey, hoverTargetNodeId: refKey ? targetNodeId : null });
+  /**
+   * 悬停引用时：标记引用本身 + 目标节点发光（不影响跳转用的 activeNodeId）。
+   * 单目标传单 id；条级组合引用传单 id（首个）+ 全部目标 id。
+   */
+  hoverRef(refKey: string | null, targetNodeId: string | null, allTargetIds?: string[]): void {
+    this.set({
+      hoverRefKey: refKey,
+      hoverTargetNodeId: refKey ? targetNodeId : null,
+      hoverTargetNodeIds: refKey ? allTargetIds ?? (targetNodeId ? [targetNodeId] : []) : [],
+    });
   }
 
   activateNode(nodeId: string): void {

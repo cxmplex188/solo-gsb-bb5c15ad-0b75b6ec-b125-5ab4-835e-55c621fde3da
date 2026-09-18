@@ -25,8 +25,22 @@ export interface ClauseDocument {
 }
 
 export type NumStyle = 'arabic' | 'chinese';
+
+/** 条级组合引用中按原文顺序出现的一个“第X条[之Y]”成员（暂不解析款、项） */
+export interface RefArticleMember {
+  /** 成员在正文中的起止（相对所属节点文本） */
+  start: number;
+  end: number;
+  raw: string;
+  articleNum: number;
+  articleSuffix?: string;
+  articleStyle?: NumStyle;
+}
+
 export type RefKind =
   | 'absolute' // 第X条[之Y][第N款][第M项 / （M）]
+  | 'articleList' // 第三条、第五条及第七条（条级组合，顿号/及/和/与连接）
+  | 'articleRange' // 第三条至第五条（条级闭区间，含两端）
   | 'this' // 本条[第N款][第M项]
   | 'prevArticle' // 前条 / 上条[链]
   | 'nextArticle' // 后条 / 下条[链]
@@ -50,9 +64,29 @@ export interface RefSpan {
   articleStyle?: NumStyle;
   paragraphStyle?: NumStyle;
   itemStyle?: NumStyle;
+  /** articleList / articleRange：按原文顺序排列的条级成员（暂不含款、项） */
+  members?: RefArticleMember[];
 }
 
 export type RefStatus = 'ok' | 'broken' | 'ambiguous';
+
+/** 组合引用中已唯一定位的目标条（按文档顺序排列） */
+export interface RefTargetEntry {
+  nodeId: string;
+  /** 目标条当前的数字风格，改写时沿用 */
+  articleStyle: NumStyle;
+}
+
+/** 组合引用中未能定位或存在歧义的成员（按原文顺序保留，供问题面板展示） */
+export interface RefMissingEntry {
+  raw: string;
+  articleNum: number;
+  articleSuffix?: string;
+  /** broken：文档中不存在该条；ambiguous：同序号条不唯一（如“第八条”与“第八条之一”并存） */
+  status: RefStatus;
+  reason?: string;
+  candidates?: string[];
+}
 
 export interface RefResolution {
   status: RefStatus;
@@ -69,6 +103,12 @@ export interface RefResolution {
     candidates: string[];
     reason?: string;
   };
+  /** articleList / articleRange：全部已解析目标，按文档顺序、去重 */
+  targetIds?: string[];
+  /** 与 targetIds 对应的目标条目（含数字风格） */
+  targetRefs?: RefTargetEntry[];
+  /** 组合引用中缺失 / 歧义的成员（按原文顺序） */
+  missing?: RefMissingEntry[];
 }
 
 export interface RefOccurrence {

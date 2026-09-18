@@ -61,6 +61,13 @@ export function RelationView() {
   const activeArticle = hl.activeNodeId
     ? analysis.placement[hl.activeNodeId]?.article.id
     : null;
+  // 悬停组合引用时，其 refKey 对应多条边；收集同一 refKey 的全部目标条，联动高亮
+  const hotEdgeKeys = new Set(
+    hoveredKey ? analysis.edges.filter((e) => e.refKey === hoveredKey).map((e) => e.refKey) : [],
+  );
+  const hoveredTargetArticles = new Set(
+    hl.hoverTargetNodeIds.map((id) => analysis.placement[id]?.article.id).filter(Boolean),
+  );
 
   return (
     <div className="relation-view">
@@ -88,7 +95,12 @@ export function RelationView() {
             const p1 = positions.get(g.from)!;
             const p2 = positions.get(g.to)!;
             const isSelf = g.from === g.to;
-            const isHot = hoveredKey && g.keys.includes(hoveredKey);
+            const isHot = g.keys.some((k) => hotEdgeKeys.has(k)) || (hoveredKey && g.keys.includes(hoveredKey));
+            // 组合引用边：收集该来源引用的全部目标条，悬停边时全部发光
+            const hotRefKey = hoveredKey && g.keys.includes(hoveredKey) ? hoveredKey : g.keys[0];
+            const comboTargetIds = new Set(
+              analysis.edges.filter((e) => e.refKey === hotRefKey).map((e) => e.targetArticleId),
+            );
             const inCycle = analysis.issues.some(
               (i) =>
                 i.type === 'cycle' &&
@@ -103,7 +115,9 @@ export function RelationView() {
                   className={`graph-edge ${cls} ${isHot ? 'hot' : ''}`}
                   d={`M ${p1.x} ${p1.y - 16} c -34 -8 -34 -44 0 -52`}
                   markerEnd="url(#arrow)"
-                  onMouseEnter={() => highlighter.hoverRef(g.keys[0], g.from)}
+                  onMouseEnter={() =>
+                    highlighter.hoverRef(g.keys[0], g.from, [...comboTargetIds])
+                  }
                   onMouseLeave={() => highlighter.hoverRef(null, null)}
                   onClick={() =>
                     highlighter.jumpTo(
@@ -131,7 +145,9 @@ export function RelationView() {
                 className={`graph-edge ${cls} ${isHot ? 'hot' : ''}`}
                 d={`M ${sx} ${sy} Q ${mx} ${my} ${ex} ${ey}`}
                 markerEnd={isHot ? 'url(#arrow-hot)' : 'url(#arrow)'}
-                onMouseEnter={() => highlighter.hoverRef(g.keys[0], g.to)}
+                onMouseEnter={() =>
+                  highlighter.hoverRef(g.keys[0], g.to, [...comboTargetIds])
+                }
                 onMouseLeave={() => highlighter.hoverRef(null, null)}
                 onClick={() =>
                   highlighter.jumpTo(
@@ -155,10 +171,11 @@ export function RelationView() {
               : inCycle
                 ? 'node-cycle'
                 : 'node-normal';
+            const hotTarget = hoveredTargetArticles.has(a.id);
             return (
               <g
                 key={a.id}
-                className={`graph-node ${cls} ${activeArticle === a.id ? 'active' : ''}`}
+                className={`graph-node ${cls} ${activeArticle === a.id ? 'active' : ''} ${hotTarget ? 'target-hot' : ''}`}
                 transform={`translate(${p.x}, ${p.y})`}
                 onMouseEnter={() => highlighter.activateNode(a.id)}
                 onMouseLeave={() => highlighter.activateNode('')}

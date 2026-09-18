@@ -101,7 +101,24 @@ function refSignature(nodeId: string, raw: string, occurrenceIndex: number): str
   return `${nodeId}::${raw}::${occurrenceIndex}`;
 }
 
+function targetKey(occ: RefOccurrence): string {
+  // 条级组合引用以按文档顺序排列的目标条 ID 序列作为目标身份
+  if (occ.span.kind === 'articleList' || occ.span.kind === 'articleRange') {
+    return `${occ.resolution.status}:${(occ.resolution.targetIds ?? []).join(',')}`;
+  }
+  return `${occ.resolution.status}:${occ.resolution.targetId ?? ''}`;
+}
+
 function targetLabel(analysis: Analysis, occ: RefOccurrence): string | undefined {
+  if (occ.span.kind === 'articleList' || occ.span.kind === 'articleRange') {
+    if (occ.resolution.status === 'ok') return occ.resolution.canonical;
+    if (occ.resolution.status === 'ambiguous') return '歧义（未确认）';
+    const resolved = (occ.resolution.targetIds ?? [])
+      .map((id) => labelAt(analysis, id))
+      .filter(Boolean)
+      .join('、');
+    return `断链：${occ.resolution.reason ?? '部分目标不存在'}${resolved ? `（已解析：${resolved}）` : ''}`;
+  }
   if (occ.resolution.status === 'ok' && occ.resolution.targetId) {
     return occ.resolution.canonical || labelAt(analysis, occ.resolution.targetId);
   }
@@ -227,9 +244,7 @@ export function diffDocuments(
       });
       continue;
     }
-    const sameTarget =
-      occ.resolution.status === next.resolution.status &&
-      (occ.resolution.targetId ?? null) === (next.resolution.targetId ?? null);
+    const sameTarget = targetKey(occ) === targetKey(next);
     if (!sameTarget) {
       refRetargeted.push({
         key: `mov:${sig}`,

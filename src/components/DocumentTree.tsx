@@ -92,14 +92,17 @@ function ArticleView({
 }) {
   const { store, highlighter } = useApp();
   const hl = useHighlighter(highlighter);
+  const analysis = store.getSnapshot().analysis;
   const [editingNumber, setEditingNumber] = useState(false);
   const [draftNum, setDraftNum] = useState(String(article.ordinal));
   const [dragOver, setDragOver] = useState(false);
 
-  const issues = store.getSnapshot().analysis.issues.filter(
+  const issues = analysis.issues.filter(
     (i) => i.sourceNodeId === article.id || i.cycleNodeIds?.includes(article.id),
   );
-  const glows = hl.hoverTargetNodeId === article.id;
+  const glows =
+    hl.hoverTargetNodeId === article.id ||
+    hl.hoverTargetNodeIds.some((id) => analysis.placement[id]?.article.id === article.id);
 
   // 问题跳转 / 关系图定位到“条”本身时滚动到该卡片
   useEffect(() => {
@@ -217,12 +220,14 @@ function ParagraphList({ article }: { article: ClauseNode }) {
   const analysis = store.getSnapshot().analysis;
   const hl = useHighlighter(highlighter);
   const glowFor = hl.hoverTargetNodeId;
+  const glowIds = hl.hoverTargetNodeIds;
+  const isGlowing = (id: string) => glowFor === id || glowIds.includes(id);
 
   return (
     <div className="paragraph-list">
       {article.children.map((paragraph, pi) => (
         <div
-          className={`node-card paragraph-card ${glowFor === paragraph.id ? 'target-glow' : ''}`}
+          className={`node-card paragraph-card ${isGlowing(paragraph.id) ? 'target-glow' : ''}`}
           key={paragraph.id}
           data-node-id={paragraph.id}
         >
@@ -249,7 +254,7 @@ function ParagraphList({ article }: { article: ClauseNode }) {
             <div className="item-list">
               {paragraph.children.map((item, ii) => (
                 <div
-                  className={`node-card item-card ${glowFor === item.id ? 'target-glow' : ''}`}
+                  className={`node-card item-card ${isGlowing(item.id) ? 'target-glow' : ''}`}
                   key={item.id}
                   data-node-id={item.id}
                 >

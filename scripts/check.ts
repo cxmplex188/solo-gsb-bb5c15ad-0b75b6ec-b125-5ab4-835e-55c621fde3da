@@ -57,6 +57,35 @@ check('前项', raws.includes('前项'), JSON.stringify(raws));
 check('后条', raws.includes('后条'), JSON.stringify(raws));
 check('第十二条', raws.includes('第十二条'), JSON.stringify(raws));
 
+// ---- 扫描器：条级组合引用（顿号列举 / 至·到闭区间，暂不解析款、项） ----
+{
+  const list = scanReferences('适用第三条、第五条及第七条规定');
+  check('组合列举 1 个 span', list.length === 1 && list[0].kind === 'articleList', JSON.stringify(list.map((s) => s.kind)));
+  check('组合列举 3 个成员', list[0].members?.length === 3 && list[0].members![2].raw === '第七条');
+  const range = scanReferences('适用第三条至第五条规定');
+  check('闭区间 1 个 span', range.length === 1 && range[0].kind === 'articleRange');
+  check('闭区间 2 个端点', range[0].members?.length === 2);
+  const withPara = scanReferences('参见第三条第二款、第五条');
+  check(
+    '成员带款时不组合',
+    withPara.every((s) => s.kind !== 'articleList' && s.kind !== 'articleRange'),
+    JSON.stringify(withPara.map((s) => s.kind + ':' + s.raw)),
+  );
+  const twoDun = scanReferences('第三条、第四条');
+  check('两条带顿号识别为列举', twoDun.some((s) => s.kind === 'articleList'));
+  const twoHe = scanReferences('第三条和第四条');
+  check('两条仅“和”连接不识别为列举（避免普通并列误判）', !twoHe.some((s) => s.kind === 'articleList'));
+  const arabic = scanReferences('第3条、第5条及第7条');
+  check('组合成员保留阿拉伯数字风格', arabic[0].members?.every((m) => m.articleStyle === 'arabic') === true);
+  const mixed = scanReferences('第三条、第五条至第七条');
+  check(
+    '混合连接回退为单条 + 闭区间',
+    mixed.some((s) => s.kind === 'articleRange' && s.raw === '第五条至第七条') &&
+      !mixed.some((s) => s.kind === 'articleList'),
+    JSON.stringify(mixed.map((s) => [s.kind, s.raw])),
+  );
+}
+
 // ---- 解析 ----
 const text = `测试办法
 
@@ -112,6 +141,327 @@ check('改写后仍检出循环', a2.issues.some((i) => i.type === 'cycle'), JSO
 check('断链保留', a2.issues.some((i) => i.type === 'broken'));
 // 移动后新位置条
 check('移动后原第三条位于第 5 位', result.doc.root[4].id === doc.root[2].id);
+
+// ---- 条级组合引用：解析为文档顺序的稳定条 ID 集合，关系图为每个目标建边 ----
+{
+  const cd = parseDocument(`组合法
+
+第一条
+适用第三条、第五条及第七条规定；区间适用第三条至第五条。
+
+第二条
+保留。
+
+第三条
+程序一。
+
+第四条
+程序二。
+
+第五条
+程序三。
+
+第六条
+程序四。
+
+第七条
+程序五。`).doc;
+  renumberAll(cd.root);
+  const ca = analyze(cd, { confirmed: {} });
+  const list = ca.occurrences.find((o) => o.span.kind === 'articleList')!;
+  check('组合列举解析成功', list.resolution.status === 'ok');
+  check(
+    '组合列举目标按文档顺序 [三,五,七]',
+    JSON.stringify(list.resolution.targetIds) ===
+      JSON.stringify([cd.root[2].id, cd.root[4].id, cd.root[6].id]),
+    JSON.stringify(list.resolution.targetIds),
+  );
+  check('组合列举为每个目标建边（3 条）', ca.edges.filter((e) => e.refKey === list.key).length === 3);
+  const range = ca.occurrences.find((o) => o.span.kind === 'articleRange')!;
+  check(
+    '闭区间展开 [三,四,五]',
+    JSON.stringify(range.resolution.targetIds) ===
+      JSON.stringify([cd.root[2].id, cd.root[3].id, cd.root[4].id]),
+  );
+  check('闭区间为每个目标建边（3 条）', ca.edges.filter((e) => e.refKey === range.key).length === 3);
+  check('组合列举规范文本为顿号', list.resolution.canonical === '第三条、第五条、第七条');
+  check('闭区间规范文本为区间', range.resolution.canonical === '第三条至第五条');
+}
+
+// ---- 条级组合引用：部分目标缺失 → 断链，问题列出已解析与缺失目标 ----
+{
+  const md = parseDocument(`缺组合法
+
+第一条
+适用第三条、第五条及第七条规定。
+
+第二条
+保留。
+
+第三条
+甲。
+
+第五条
+丙。`).doc; // 跳号：无第四、六、七条
+  const ma = analyze(md, { confirmed: {} });
+  const list = ma.occurrences.find((o) => o.span.kind === 'articleList')!;
+  check('部分缺失：状态为断链', list.resolution.status === 'broken');
+  check('部分缺失：保留已解析目标', list.resolution.targetIds?.length === 2);
+  check('部分缺失：登记缺失成员第七条', list.resolution.missing?.[0]?.articleNum === 7);
+  check(
+    '问题文本同时列出已解析与未能定位',
+    ma.issues.some((i) => i.message.includes('已解析') && i.message.includes('未能定位')),
+    JSON.stringify(ma.issues.map((i) => i.message)),
+  );
+}
+
+// ---- 条级组合引用：闭区间端点缺失 → 断链且不展开 ----
+{
+  const rd = parseDocument(`缺区间法
+
+第一条
+适用第三条至第五条规定。
+
+第三条
+甲。
+
+第四条
+乙。`).doc; // 无第五条
+  const ra = analyze(rd, { confirmed: {} });
+  const range = ra.occurrences.find((o) => o.span.kind === 'articleRange')!;
+  check('闭区间端点缺失：断链', range.resolution.status === 'broken');
+  check('闭区间端点缺失：登记第五条', range.resolution.missing?.[0]?.articleNum === 5);
+}
+
+// ---- 条级组合引用：同序号后缀条导致端点歧义 ----
+{
+  const ad = parseDocument(`组合歧义法
+
+第一条
+适用第三条、第五条规定。
+
+第三条
+普通三。
+
+第五条
+普通五。`).doc;
+  ad.root.push({
+    id: 'art-suf-3',
+    kind: 'article',
+    ordinal: 3,
+    suffix: '一',
+    text: '',
+    children: [{ id: 'par-suf', kind: 'paragraph', ordinal: 1, text: '后缀三。', children: [] }],
+  });
+  const aa = analyze(ad, { confirmed: {} });
+  const list = aa.occurrences.find((o) => o.span.kind === 'articleList')!;
+  check(
+    '组合端点歧义',
+    list.resolution.status === 'ambiguous' &&
+      list.resolution.missing?.[0]?.status === 'ambiguous',
+  );
+}
+
+// ---- 条级组合引用：结构调整后保持原目标集合，连续输出区间、不连续展开顿号 ----
+{
+  // 非目标条插入目标之间：闭区间目标变得不连续 → 展开顿号列表
+  const bd = parseDocument(`区间展开法
+
+第一条
+头。
+
+第二条
+插入条。
+
+第三条
+见第三条至第五条。
+
+第四条
+乙。
+
+第五条
+丙。
+
+第六条
+尾。`).doc;
+  renumberAll(bd.root);
+  const ba = analyze(bd, { confirmed: {} });
+  const br = applyStructuralChange(bd, ba, (root) => {
+    // [1,2,3,4,5,6] → [1,3,2,4,5,6]：原 3,4,5 变为 2,4,5，不连续
+    const second = root.splice(1, 1)[0];
+    root.splice(2, 0, second);
+  });
+  const src = br.doc.root.find((x) => x.children.some((c) => c.text.startsWith('见')))!;
+  check('目标不连续 → 展开顿号列表', src.children[0].text === '见第二条、第四条、第五条。', src.children[0].text);
+  check('组合改写计入同一原子步骤（1 处）', br.rewritten === 1, String(br.rewritten));
+
+  // 整体平移保持连续：闭区间仍输出区间，沿用编号
+  const cd2 = parseDocument(`区间连续法
+
+第一条
+见第三条至第五条。
+
+第二条
+保留。
+
+第三条
+甲。
+
+第四条
+乙。
+
+第五条
+丙。`).doc;
+  renumberAll(cd2.root);
+  const ca2 = analyze(cd2, { confirmed: {} });
+  const cr2 = applyStructuralChange(cd2, ca2, (root) => {
+    const first = root.shift()!;
+    const second = root.shift()!;
+    root.push(first, second); // 原 3,4,5 → 1,2,3
+  });
+  check(
+    '目标仍连续 → 输出区间',
+    cr2.doc.root[3].children[0].text === '见第一条至第三条。',
+    cr2.doc.root[3].children[0].text,
+  );
+
+  // 列表目标整体平移：保持顿号形式并更新编号
+  const ld = parseDocument(`列表平移法
+
+第一条
+甲。
+
+第二条
+乙。
+
+第三条
+见第三条、第四条、第五条。
+
+第四条
+丁。
+
+第五条
+戊。
+
+第六条
+保留。`).doc;
+  renumberAll(ld.root);
+  const la = analyze(ld, { confirmed: {} });
+  const lr = applyStructuralChange(ld, la, (root) => {
+    const sixth = root.splice(5, 1)[0];
+    root.unshift(sixth); // 原 3,4,5 → 4,5,6，仍连续
+  });
+  const lsrc = lr.doc.root.find((x) => x.children.some((c) => c.text.startsWith('见')))!;
+  check('列表目标仍连续 → 保持顿号并更新编号', lsrc.children[0].text === '见第四条、第五条、第六条。', lsrc.children[0].text);
+}
+
+// ---- 条级组合引用：沿用原数字风格（阿拉伯） ----
+{
+  const sd = parseDocument(`风格法
+
+第一条
+见第3条、第4条、第6条。
+
+第二条
+保留。
+
+第三条
+甲。
+
+第四条
+乙。
+
+第五条
+戊。
+
+第六条
+己。`).doc;
+  renumberAll(sd.root);
+  const sa = analyze(sd, { confirmed: {} });
+  // 删除非目标的第五条：目标 3,4,6 重编号为 3,4,5（连续），列表仍以顿号输出并保留阿拉伯风格
+  const sr = applyStructuralChange(sd, sa, (root) => {
+    root.splice(4, 1);
+  });
+  check(
+    '组合改写沿用阿拉伯数字风格',
+    sr.doc.root[0].children[0].text === '见第3条、第4条、第5条。',
+    sr.doc.root[0].children[0].text,
+  );
+}
+
+// ---- 条级组合引用：任一目标被删除 → 整段不改写，列入 skipped ----
+{
+  const dd = parseDocument(`组合删除法
+
+第一条
+见第三条、第四条、第五条。
+
+第二条
+保留。
+
+第三条
+甲。
+
+第四条
+乙。
+
+第五条
+丙。`).doc;
+  renumberAll(dd.root);
+  const da = analyze(dd, { confirmed: {} });
+  const dr = applyStructuralChange(dd, da, (root) => {
+    root.splice(4, 1); // 删除第五条（目标之一）
+  });
+  check(
+    '目标被删除：整段不改写',
+    dr.doc.root[0].children[0].text === '见第三条、第四条、第五条。',
+    dr.doc.root[0].children[0].text,
+  );
+  check('目标被删除：标记 targetMissing', dr.skipped.some((s) => s.targetMissing));
+}
+
+// ---- 条级组合引用：含“之一”后缀条且端点可能歧义 → 整段不改写 ----
+{
+  const sd2 = parseDocument(`后缀组合法
+
+第一条
+见第三条至第五条。
+
+第二条
+保留。
+
+第三条
+甲。
+
+第四条
+乙。
+
+第五条
+丙。`).doc;
+  renumberAll(sd2.root);
+  // 新增与第三条同序号的“第三条之一”，使原闭区间起端所在序号出现后缀条（端点歧义）
+  sd2.root.push({
+    id: 'art-suf-c',
+    kind: 'article',
+    ordinal: 3,
+    suffix: '一',
+    text: '',
+    children: [{ id: 'par-suf-c', kind: 'paragraph', ordinal: 1, text: '后缀条。', children: [] }],
+  });
+  const sa2 = analyze(sd2, { confirmed: {} });
+  // 后缀条重排到第三条附近
+  const sr2 = applyStructuralChange(sd2, sa2, (root) => {
+    const suf = root.splice(root.findIndex((x) => x.suffix), 1)[0];
+    root.splice(2, 0, suf);
+  });
+  const srcNode = sr2.doc.root.find((x) => x.children.some((c) => c.text === '见第三条至第五条。'));
+  check('含后缀条：组合整段不改写', Boolean(srcNode));
+  check(
+    '含后缀条：登记 skipped',
+    sr2.skipped.some((s) => s.raw === '第三条至第五条'),
+    sr2.skipped.map((s) => s.reason).join('|'),
+  );
+}
 
 // ---- 自引用检测 ----
 const selfText = `第一条

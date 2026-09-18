@@ -5,9 +5,12 @@ import type {
   ClauseNode,
   Issue,
   NodePlacement,
+  RefArticleMember,
   RefOccurrence,
   RefResolution,
   RefSpan,
+  RefTargetEntry,
+  RefMissingEntry,
 } from '../../shared/model';
 import { scanReferences } from './scanner';
 import { formatOrdinal } from './numeral';
@@ -88,6 +91,158 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
   const findArticle = (ordinal: number, suffix?: string): ClauseNode | undefined =>
     articles.find((a) => a.ordinal === ordinal && (a.suffix ?? '') === (suffix ?? ''));
 
+  /** 条级组合引用（列举 / 闭区间）：解析为按文档顺序、去重的稳定条 ID 集合 */
+  const resolveCombo = (span: RefSpan): RefResolution => {
+    const written = span.members ?? [];
+    let wanted: RefArticleMember[];
+
+    if (span.kind === 'articleRange' && written.length === 2) {
+      // 闭区间：两个端点都存在时展开为按 ordinal 连续的全部条；任一端点缺失即整段失败
+      const [loMember, hiMember] = written;
+      const lo = findArticle(loMember.articleNum, loMember.articleSuffix);
+      const hi = findArticle(hiMember.articleNum, hiMember.articleSuffix);
+      const endpoints: { member: RefArticleMember; article?: ClauseNode }[] = [
+        { member: loMember, article: lo },
+        { member: hiMember, article: hi },
+      ];
+      if (!lo || !hi) {
+        const missing: RefMissingEntry[] = endpoints
+          .filter((e) => !e.article)
+          .map((e) => ({
+            raw: e.member.raw,
+            articleNum: e.member.articleNum,
+            ...(e.member.articleSuffix ? { articleSuffix: e.member.articleSuffix } : {}),
+            status: 'broken',
+            reason: `找不到“${e.member.raw}”，闭区间端点不完整`,
+          }));
+        const resolved: RefTargetEntry[] = endpoints
+          .filter((e) => e.article)
+          .map((e) => ({
+            nodeId: e.article!.id,
+            articleStyle: e.member.articleStyle ?? 'chinese',
+          }));
+        return {
+          status: 'broken',
+          reason: `闭区间“${span.raw}”端点不完整，无法确定全部目标`,
+          targetIds: resolved.map((r) => r.nodeId),
+          targetRefs: resolved,
+          missing,
+        };
+      }
+      const loIdx = articles.indexOf(lo);
+      const hiIdx = articles.indexOf(hi);
+      if (loIdx > hiIdx) {
+        return {
+          status: 'broken',
+          reason: `闭区间“${span.raw}”起端位于止端之后（第${formatOrdinal(
+            lo.ordinal,
+          )}条在第${formatOrdinal(hi.ordinal)}条之后）`,
+          targetIds: [lo.id, hi.id],
+          targetRefs: [
+            { nodeId: lo.id, articleStyle: loMember.articleStyle ?? 'chinese' },
+            { nodeId: hi.id, articleStyle: hiMember.articleStyle ?? 'chinese' },
+          ],
+          missing: [],
+        };
+      }
+      wanted = articles
+        .slice(loIdx, hiIdx + 1)
+        .map((a) => ({
+          start: 0,
+          end: 0,
+          raw: articleLabel(a),
+          articleNum: a.ordinal,
+          ...(a.suffix ? { articleSuffix: a.suffix } : {}),
+          articleStyle: loMember.articleStyle ?? 'chinese',
+        }));
+    } else {
+      wanted = written;
+    }
+
+    const resolved: RefTargetEntry[] = [];
+    const missing: RefMissingEntry[] = [];
+    let ambiguous = false;
+    const seen = new Set<string>();
+
+    for (const member of wanted) {
+      // 无后缀且文档中存在多个同序号条（含“之一/之二”后缀条）：端点歧义
+      if (!member.articleSuffix) {
+        const sameOrdinal = articles.filter((a) => a.ordinal === member.articleNum);
+        if (sameOrdinal.length > 1) {
+          ambiguous = true;
+          missing.push({
+            raw: member.raw,
+            articleNum: member.articleNum,
+            status: 'ambiguous',
+            reason: `存在 ${sameOrdinal.length} 个“第${formatOrdinal(
+              member.articleNum,
+              member.articleStyle,
+            )}条”（含“之一/之二”后缀条）`,
+            candidates: sameOrdinal.map((a) => a.id),
+          });
+          continue;
+        }
+      }
+      const article = findArticle(member.articleNum, member.articleSuffix);
+      if (!article) {
+        missing.push({
+          raw: member.raw,
+          articleNum: member.articleNum,
+          ...(member.articleSuffix ? { articleSuffix: member.articleSuffix } : {}),
+          status: 'broken',
+          reason: `找不到“${member.raw}”`,
+        });
+        continue;
+      }
+      if (!seen.has(article.id)) {
+        seen.add(article.id);
+        resolved.push({ nodeId: article.id, articleStyle: member.articleStyle ?? 'chinese' });
+      }
+    }
+
+    // 已解析目标按文档顺序排列（区间展开时本就有序，列举引用在此统一排序）
+    resolved.sort(
+      (a, b) => articles.findIndex((x) => x.id === a.nodeId) - articles.findIndex((x) => x.id === b.nodeId),
+    );
+    const targetIds = resolved.map((r) => r.nodeId);
+
+    if (ambiguous) {
+      return {
+        status: 'ambiguous',
+        reason: `组合引用“${span.raw}”中存在同序号条，端点有歧义`,
+        targetIds: targetIds.length ? targetIds : undefined,
+        targetRefs: resolved.length ? resolved : undefined,
+        missing,
+      };
+    }
+    if (missing.length > 0) {
+      return {
+        status: 'broken',
+        reason: `组合引用“${span.raw}”有 ${missing.length} 个目标不存在`,
+        targetIds,
+        targetRefs: resolved,
+        missing,
+      };
+    }
+    if (targetIds.length < 2) {
+      // 全部成员解析到同一条（如“第三条、第三条”）：不构成多目标组合
+      return {
+        status: 'broken',
+        reason: `组合引用“${span.raw}”的成员未指向不同的条`,
+        targetIds,
+        targetRefs: resolved,
+        missing: [],
+      };
+    }
+    return {
+      status: 'ok',
+      targetId: targetIds[0],
+      targetIds,
+      targetRefs: resolved,
+      canonical: comboCanonical(resolved, articles, span.kind === 'articleRange'),
+    };
+  };
+
   const resolve = (
     nodeId: string,
     span: RefSpan,
@@ -95,6 +250,10 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
     const here = byId.get(nodeId);
     if (!here) return { resolution: { status: 'broken', reason: '源节点不存在' } };
     const { placement: hp } = here;
+
+    if (span.kind === 'articleList' || span.kind === 'articleRange') {
+      return { resolution: resolveCombo(span) };
+    }
 
     let article: ClauseNode | undefined;
     let paragraphNum: number | undefined;
@@ -309,22 +468,30 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
     (byNode[occ.nodeId] ??= []).push(occ);
   }
 
-  // 边（条级）
+  // 边（条级）：组合引用对每个已解析目标都建立一条边
   const edges: ArticleEdge[] = [];
   for (const occ of occurrences) {
-    if (occ.resolution.status !== 'ok' || !occ.resolution.targetId) continue;
     const src = placement[occ.nodeId];
-    const dst = placement[occ.resolution.targetId];
-    if (!src || !dst) continue;
-    edges.push({
-      sourceArticleId: src.article.id,
-      targetArticleId: dst.article.id,
-      sourceNodeId: occ.nodeId,
-      targetNodeId: occ.resolution.targetId,
-      kind: occ.span.kind,
-      status: occ.resolution.status,
-      refKey: occ.key,
-    });
+    if (!src) continue;
+    const isCombo = occ.span.kind === 'articleList' || occ.span.kind === 'articleRange';
+    const targetIds = isCombo
+      ? occ.resolution.targetIds ?? []
+      : occ.resolution.status === 'ok' && occ.resolution.targetId
+        ? [occ.resolution.targetId]
+        : [];
+    for (const targetId of targetIds) {
+      const dst = placement[targetId];
+      if (!dst) continue;
+      edges.push({
+        sourceArticleId: src.article.id,
+        targetArticleId: dst.article.id,
+        sourceNodeId: occ.nodeId,
+        targetNodeId: targetId,
+        kind: occ.span.kind,
+        status: occ.resolution.status,
+        refKey: occ.key,
+      });
+    }
   }
 
   // 问题：断链 / 自引用 / 歧义
@@ -341,6 +508,41 @@ export function analyze(doc: ClauseDocument, opts: AnalyzeOptions = { confirmed:
       refEnd: occ.span.end,
       refKey: occ.key,
     };
+    if (occ.span.kind === 'articleList' || occ.span.kind === 'articleRange') {
+      // 条级组合引用：断链 / 歧义时在问题面板列出已解析与缺失（或歧义）目标
+      if (occ.resolution.status === 'broken' || occ.resolution.status === 'ambiguous') {
+        const type = occ.resolution.status === 'broken' ? 'broken' : 'ambiguous';
+        const resolvedLabels = (occ.resolution.targetIds ?? [])
+          .map((id) => '第' + articleLabel(placement[id].article));
+        const missingLabels = (occ.resolution.missing ?? []).map(
+          (m) => `“${m.raw}”（${m.status === 'ambiguous' ? '歧义' : '缺失'}）`,
+        );
+        const detail: string[] = [];
+        if (resolvedLabels.length) detail.push(`已解析：${resolvedLabels.join('、')}`);
+        if (missingLabels.length) detail.push(`未能定位：${missingLabels.join('、')}`);
+        issues.push({
+          ...base,
+          type,
+          message: `${type === 'broken' ? '断链' : '歧义引用'}：${occ.span.raw} —— ${
+            occ.resolution.reason ?? '部分目标无法定位'
+          }${detail.length ? `；${detail.join('；')}` : ''}`,
+        });
+      } else if (
+        // 组合引用中包含源节点所在条：冗余自指
+        (occ.resolution.targetIds ?? []).some(
+          (id) => placement[id]?.article.id === placement[occ.nodeId]?.article.id,
+        )
+      ) {
+        issues.push({
+          ...base,
+          type: 'self',
+          targetNodeId: placement[occ.nodeId]?.article.id,
+          message: `自引用：${occ.span.raw} 中包含本条，建议改为相对引用或从组合中剔除`,
+        });
+      }
+      continue;
+    }
+
     if (occ.resolution.status === 'broken') {
       issues.push({
         ...base,
@@ -428,6 +630,46 @@ function canonicalText(_span: RefSpan, target: ClauseNode, p: NodePlacement): st
     s += `第${formatOrdinal(p.itemIndex)}项`;
   }
   return s;
+}
+
+/**
+ * 条级组合引用的规范文本：目标在文档中连续时输出闭区间“第X条至第Y条”，
+ * 不连续时展开为顿号列表“第X条、第Y条、第Z条”；各目标沿用其原文数字风格。
+ */
+export function renderArticleCombo(
+  targets: { nodeId: string; articleStyle?: 'arabic' | 'chinese' }[],
+  articles: ClauseNode[],
+  preferRange: boolean,
+): string {
+  const located = targets
+    .map((t) => ({ article: articles.find((a) => a.id === t.nodeId), style: t.articleStyle ?? 'chinese' }))
+    .filter((x): x is { article: ClauseNode; style: 'arabic' | 'chinese' } => Boolean(x.article));
+  const label = (article: ClauseNode, style: 'arabic' | 'chinese') =>
+    `第${formatOrdinal(article.ordinal, style)}条${article.suffix ? `之${article.suffix}` : ''}`;
+  const contiguous =
+    located.length >= 2 &&
+    located.every(
+      (x, i) =>
+        i === 0 ||
+        (x.article.ordinal === located[i - 1].article.ordinal + 1 &&
+          !x.article.suffix &&
+          !located[i - 1].article.suffix),
+    );
+  if (contiguous && preferRange) {
+    return `${label(located[0].article, located[0].style)}至${label(
+      located[located.length - 1].article,
+      located[located.length - 1].style,
+    )}`;
+  }
+  return located.map((x) => label(x.article, x.style)).join('、');
+}
+
+function comboCanonical(
+  targets: RefTargetEntry[],
+  articles: ClauseNode[],
+  preferRange: boolean,
+): string {
+  return renderArticleCombo(targets, articles, preferRange);
 }
 
 function locateSentence(text: string, start: number, end: number): { start: number; end: number } {

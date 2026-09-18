@@ -85,6 +85,8 @@ function IssueRow({ issue }: { issue: Issue }) {
   const refOcc: RefOccurrence | undefined = issue.refKey
     ? analysis.occurrences.find((o) => o.key === issue.refKey)
     : undefined;
+  const isComboRef =
+    refOcc?.span.kind === 'articleList' || refOcc?.span.kind === 'articleRange';
 
   const sentenceText = sourceNode
     ? sourceNode.text.slice(issue.sentenceStart, issue.sentenceEnd).trim()
@@ -116,7 +118,11 @@ function IssueRow({ issue }: { issue: Issue }) {
       </button>
       <div className="issue-message">{issue.message}</div>
 
-      {issue.type === 'ambiguous' && refOcc && (
+      {isComboRef && refOcc && (issue.type === 'broken' || issue.type === 'ambiguous') && (
+        <ComboTargetList occurrence={refOcc} />
+      )}
+
+      {issue.type === 'ambiguous' && refOcc && !isComboRef && (
         <CandidatePicker occurrence={refOcc} />
       )}
 
@@ -137,6 +143,59 @@ function IssueRow({ issue }: { issue: Issue }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** 组合引用问题：列出已解析目标（可逐个跳转）与缺失 / 歧义成员 */
+function ComboTargetList({ occurrence }: { occurrence: RefOccurrence }) {
+  const { store, highlighter } = useApp();
+  const { analysis } = store.getSnapshot();
+  const resolvedIds = occurrence.resolution.targetIds ?? [];
+  const missing = occurrence.resolution.missing ?? [];
+  return (
+    <div className="candidate-box combo-target-box">
+      {resolvedIds.length > 0 && (
+        <div className="candidate-title">已解析目标（{resolvedIds.length}）：</div>
+      )}
+      {resolvedIds.map((id) => (
+        <div key={id} className="combo-target-line">
+          <button type="button" className="link-btn" onClick={() => highlighter.jumpTo(id)}>
+            → {labelOfNode(analysis, id)}
+          </button>
+        </div>
+      ))}
+      {missing.length > 0 && (
+        <div className="candidate-title combo-missing-title">
+          未能定位目标（{missing.length}，结构调整时整段不会改写）：
+        </div>
+      )}
+      {missing.map((m, i) => (
+        <div key={`${m.raw}-${i}`} className={`combo-target-line combo-missing-${m.status}`}>
+          {m.raw}
+          <span className="combo-missing-tag">
+            {m.status === 'ambiguous' ? '歧义' : '缺失'}
+          </span>
+          {m.reason ? <span className="combo-missing-reason">（{m.reason}）</span> : null}
+          {m.status === 'ambiguous' && m.candidates && (
+            <span className="combo-candidates">
+              {' '}
+              候选：
+              {m.candidates.map((id, ci) => (
+                <button
+                  key={id}
+                  type="button"
+                  className="link-btn"
+                  onClick={() => highlighter.jumpTo(id)}
+                >
+                  {labelOfNode(analysis, id)}
+                  {ci < m.candidates!.length - 1 ? '、' : ''}
+                </button>
+              ))}
+            </span>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
